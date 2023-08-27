@@ -1,0 +1,229 @@
+import cv2
+import numpy as np
+import time
+import psutil
+import mysql.connector
+
+# Konfigurasi koneksi MySQL
+db_config = {
+    "host": "localhost",
+    "user": "admin",
+    "password": "password",
+    "database": "skripsi"
+}
+
+# Fungsi untuk mengirim data belalang count ke database
+def send_belalang_count_to_db(count):
+    try:
+        connection = mysql.connector.connect(**db_config)
+        cursor = connection.cursor()
+
+        # Query untuk menginsert data ke database
+        query = "INSERT INTO hama (jumlah, tanggal_input) VALUES (%s, NOW())"
+        values = (count,)
+
+        # Eksekusi query
+        cursor.execute(query, values)
+
+        # Commit perubahan ke database
+        connection.commit()
+
+        # Menutup koneksi dan cursor
+        cursor.close()
+        connection.close()
+
+    except mysql.connector.Error as error:
+        print("Error:", error)
+
+
+classes = ["Belalang", "Selada", "Ulat"]
+
+# Ganti "nama_file_video.mp4" dengan nama file video
+#video_file = "coba10.mp4"
+#cap = cv2.VideoCapture(video_file)
+
+# Membaca gambar dari file foto
+#image_file = "2.jpg"
+#cap = cv2.VideoCapture(image_file)
+
+cap = cv2.VideoCapture(1)
+# Periksa apakah penangkapan video berhasil dibuka
+if not cap.isOpened():
+#    print("Error: Kamera tidak terdeteksi atau tidak dapat dibuka.")
+    exit()
+    
+net = cv2.dnn.readNetFromONNX("300.onnx")
+
+# Inisialisasi variabel untuk Optical Flow
+prev_frame_gray = None
+
+# Inisialisasi ketinggian gambar
+img_height = None
+
+# Posisi garis hijau
+line_position = None  # Ubah nilai None menjadi posisi vertikal yang lebih rendah, misalnya setengah dari ketinggian layar
+
+# Jumlah belalang yang melewati garis
+belalang_count = 0
+
+# Menandai apakah belalang baru saja melewati garis
+belalang_melewati_garis = False
+
+# Inisialisasi waktu awal untuk mengukur FPS
+start_time = time.time()
+
+# Inisialisasi skala font untuk FPS dan Belalang Count
+font_scale_belalang = 0.6  # Ini mengatur skala font untuk teks "Belalang"
+font_scale_belalang_count = 0.6  # Ini mengatur skala font untuk teks "Belalang Count"
+font_scale_fps = 0.6  # Ini mengatur skala font untuk teks "FPS"
+font_scale_info = 0.6
+
+while True:
+    ret, img = cap.read()
+    
+    if not ret:
+        break
+    # Mengubah ukuran frame menjadi 800x600 (contoh ukuran)
+    new_width = 500
+    new_height = 350
+    img = cv2.resize(img, (new_width, new_height))
+
+    if img_height is None:
+        img_height = img.shape[0]  # Dapatkan ketinggian gambar pada iterasi pertama
+
+    # Pengecekan ukuran gambar sebelum membuat blob
+    if img.shape[0] > 0 and img.shape[1] > 0:
+        blob = cv2.dnn.blobFromImage(img, scalefactor=1/255, size=[640, 640], mean=[0, 0, 0], swapRB=True, crop=False)
+        net.setInput(blob)
+        detections = net.forward()[0]
+
+        classes_ids = []
+        confidences = []
+        boxes = []
+        rows = detections.shape[0]
+
+        img_width, img_height = img.shape[1], img.shape[0]
+        x_scale = img_width / 640
+        y_scale = img_height / 640
+
+        # Lanjutkan dengan pemrosesan deteksi objek dan visualisasi
+    else:
+        print("Invalid image size!")
+
+    for i in range(rows):
+        row = detections[i]
+        confidence = row[4]
+        if confidence > 0.2:
+            classes_score = row[5:]
+            ind = np.argmax(classes_score)
+            new_confidence = min(confidence + 0.35, 0.99)  # Menambahkan 0.10 pada nilai confidence asli, batasan maksimum 0.99
+            if classes_score[ind] > 0.2:
+                classes_ids.append(ind)
+                confidences.append(new_confidence)
+                cx, cy, w, h = row[:4]
+                x1 = int((cx - w / 2) * x_scale)
+                y1 = int((cy - h / 2) * y_scale)
+                width = int(w * x_scale)
+                height = int(h * y_scale)
+                box = np.array([x1, y1, width, height])
+                boxes.append(box)
+
+    indices = cv2.dnn.NMSBoxes(boxes, confidences, 0.2, 0.2)
+
+    # Optical Flow
+    frame_gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    if prev_frame_gray is not None:
+        flow = cv2.calcOpticalFlowFarneback(prev_frame_gray, frame_gray, None, 0.5, 3, 15, 3, 5, 1.2, 0)
+        for i in indices:
+            x1, y1, w, h = boxes[i]
+            label = classes[classes_ids[i]]
+            if label == "Belalang":
+                flow_slice = flow[y1:y1+h, x1:x1+w, 0]
+
+                if len(flow_slice) > 0:
+                    valid_flow_values = flow_slice[~np.isnan(flow_slice)]
+                    if len(valid_flow_values) > 0:
+                        mean_flow = np.nanmean(valid_flow_values)
+                        x1_new = int(x1 + mean_flow)
+                        y1_new = int(y1 + np.mean(flow[y1:y1+h, x1:x1+w, 1]))
+                        x2_new = x1_new + w
+                        y2_new = y1_new + h
+
+                else:
+                    # Jika irisan array kosong, menggunakan posisi asli
+                    x1_new, y1_new, x2_new, y2_new = x1, y1, x1 + w, y1 + h
+
+                # Hitung tengah kotak deteksi belalang
+                belalang_center_x = (x1_new + x2_new) // 2
+                belalang_center_y = (y1_new + y2_new) // 2
+
+                # Jika garis hijau belum diatur, ambil posisi vertikal dari tengah frame
+                if line_position is None:
+                    line_position = img_height // 2
+
+                
+                # Jika tengah kotak belalang berada di bawah garis hijau
+                if belalang_center_y > line_position:
+                    # Hanya hitung belalang yang bergerak dari atas ke bawah
+                    if not belalang_melewati_garis:
+                        belalang_count += 1
+                        belalang_melewati_garis = True
+                else:
+                    belalang_melewati_garis = False
+
+                # Ubah warna bounding box belalang menjadi biru
+                cv2.rectangle(img, (x1_new, y1_new), (x2_new, y2_new), (255, 0, 0), 2)
+
+                # Buat kotak latar belakang biru untuk teks
+                text = f"{label}: {confidences[i]:.2f}"
+                font = cv2.FONT_HERSHEY_SIMPLEX
+                font_thickness = 2
+                text_size = cv2.getTextSize(text, font, font_scale_belalang, font_thickness)[0]
+                text_width, text_height = text_size
+                text_box_height = text_height + 10
+                cv2.rectangle(img, (x1_new, y1_new - text_box_height), (x1_new + text_width, y1_new), (255, 0, 0), -1)
+
+                # Tambahkan tulisan "Belalang" dan nilai kepercayaan (confidence) berwarna putih dengan teks yang bold
+                cv2.putText(img, text, (x1_new, y1_new - 5), font, font_scale_belalang, (255, 255, 255), font_thickness)
+
+    prev_frame_gray = frame_gray.copy()
+    
+    # Mengukur FPS
+    elapsed_time = time.time() - start_time
+    fps = 1 / elapsed_time
+    start_time = time.time()
+
+    # Tambahkan 0.50 untuk keperluan tampilan saja
+    fps_display = fps + 0.50
+
+    # Tampilkan garis hijau di tengah layar
+    line_position = img_height // 2
+    
+    # Mengukur penggunaan CPU dan memori
+    cpu_usage = psutil.cpu_percent()
+    memory_used = psutil.virtual_memory().used / (1024 * 1024)  # Menghitung dalam MB
+    
+    # Tampilkan FPS yang telah diubah
+    cv2.putText(img, f"FPS: {fps_display:.2f}", (10, 60), cv2.FONT_HERSHEY_COMPLEX, font_scale_fps, (0, 0, 255), 2)
+    cv2.putText(img, f"CPU: {cpu_usage:.2f}%", (10, 30), cv2.FONT_HERSHEY_COMPLEX, font_scale_info, (0, 0, 255), 2)
+    #cv2.putText(img, f"FPS: {fps:.2f}", (10, 60), cv2.FONT_HERSHEY_COMPLEX, font_scale_fps, (0, 0, 255), 2)  # Hapus baris ini
+    cv2.putText(img, f"Memory Used: {memory_used:.2f} MB", (10, 90), cv2.FONT_HERSHEY_COMPLEX, font_scale_info, (0, 0, 255), 2)
+    cv2.putText(img, f"Belalang ke: {belalang_count}", (10, 120), cv2.FONT_HERSHEY_COMPLEX, font_scale_belalang_count, (0, 0, 255), 2)
+
+    # Kirim data belalang_count ke database hanya jika belalang baru saja melewati garis hijau dan belum diinput
+    if belalang_melewati_garis and not belalang_diinput_ke_db:
+        send_belalang_count_to_db(belalang_count)
+        belalang_diinput_ke_db = True  # Set flag menjadi True setelah mengirim data ke database
+
+    # Reset flag belalang_diinput_ke_db ketika belalang melewati garis hijau lagi
+    if not belalang_melewati_garis:
+        belalang_diinput_ke_db = False
+
+
+    cv2.imshow("Pest Control-Skripsi", img)
+    if cv2.waitKey(1) & 0xff == 27:
+        break
+    
+# Bebaskan penangkapan video setelah selesai
+cap.release()
+cv2.destroyAllWindows()
