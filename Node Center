@@ -1,1 +1,159 @@
+import serial
+import RPi.GPIO as GPIO
+import mysql.connector
+import time
+import requests  # Tambahkan import untuk library requests
+from RPi_GPIO_i2c_LCD import lcd
+from gpiozero import Buzzer, InputDevice, LED
 
+# Buka koneksi serial dengan Arduino
+ser = serial.Serial('/dev/ttyUSB0', 115200) #Pastikan port usb benar, cek diarduino ide!
+
+# Buat koneksi ke MySQL
+db_config = {
+    'host': 'localhost',
+    'user': 'admin',
+    'password': 'password',
+    'database': 'skripsi',
+}
+
+conn = mysql.connector.connect(**db_config)
+cursor = conn.cursor()
+
+# LCD
+lcdDisplay = lcd.HD44780(0x27)
+#LED Kuning
+led = LED(17)
+rata_rata_value = 0
+rata_rata_string = str(rata_rata_value)
+
+#buzzer
+GPIO.setwarnings(False)
+GPIO.setmode(GPIO.BCM)
+buzzer=23
+GPIO.setup(buzzer,GPIO.OUT)
+try:
+    while True:
+        
+        # Baca data dari Arduino (baris per baris)
+        line = ser.readline().decode().strip()
+
+        # Jika data berhasil dibaca
+        if line:
+            # Proses data
+            data = line.split(',')
+            if len(data) == 9:
+                distancePercentage = int(data[0].split(':')[1])
+                temperatureC = float(data[1].split(':')[1])
+                suhu = float(data[2].split(':')[1])
+                kelembaban = int(data[3].split(':')[1])
+                sensorhujan = int(data[4].split(':')[1])
+                tdsValue = int(data[5].split(':')[1])
+                pHair = float(data[6].split(':')[1])
+                kapasitas = int(data[7].split(':')[1])
+                serialonoff = int(data[8].split(':')[1])
+
+                # Tampilkan data
+                print("Kapasitas Tank  :", distancePercentage, "%")
+                print("Suhu Air        :", temperatureC, "°C")
+                #print("Suhu DHT11      :", suhu, "°C")
+                print("Kelembaban      :", kelembaban)
+                print("Sensor Hujan    :", "Aktif" if sensorhujan else "Tidak Aktif")
+                print("TDS Value       :", tdsValue, "PPM")
+                print("Nilai pH Cairan :", pHair)
+
+                # Proses kapasitas
+                if kapasitas == 1:
+                    print("Kapasitas       : Pestisida Habis")
+                    led.on()
+                    GPIO.output(buzzer,GPIO.HIGH)
+                else:
+                    print("Kapasitas       : Pestisida Tersedia")
+                    led.off()
+                    GPIO.output(buzzer,GPIO.LOW)
+                # Pompa
+                if serialonoff == 1:
+                    print("Relay Pompa     : Aktif")
+                else:
+                    print("Relay Pompa     : Tidak Aktif")
+                    
+                # Tambahkan perintah SQL untuk mengambil data dengan status > 0
+                select_query = (
+                    "SELECT `id`, `jam`, `status`, `tanggal` FROM `alarm` WHERE `status` > 0"
+                )
+                cursor.execute(select_query)
+
+                # Ambil semua baris hasil query
+                rows = cursor.fetchall()
+
+                    # Jika ada data dengan status > 0, maka print "Alarm Aktif"
+                if len(rows) > 0:
+                    print("Alarm           : Aktif")
+                    led.on()
+                    GPIO.output(buzzer,GPIO.HIGH)
+                    time.sleep(1)
+                    GPIO.output(buzzer,GPIO.LOW)
+                    # Ubah data status > 0 menjadi 0 di http://localhost/adminhub-master/ubahstatus.php
+                    url = "http://localhost/adminhub-master/ubahstatus.php"
+                    data = {"status": 0}  # Data yang akan dikirimkan untuk mengubah status
+                    response = requests.post(url, data=data)
+                    # Kirim pesan ke Arduino
+                    # Ubah bagian yang mengirimkan pesan ke Arduino
+                    pesan = str(rata_rata_value)  # Mengubah nilai rata_rata_value menjadi string
+                    ser.write(pesan.encode())
+
+                else:
+                    led.off()
+                    print("Alarm           : Tidak Aktif")
+                    pesan = "Mati"  # Kirim pesan "Mati"
+                    ser.write(pesan.encode())
+
+                insert_query = (
+                    "INSERT INTO tb_sensor "
+                    "(suhu, kelembaban, distancePercentage, relayValue, relaynilai, sensorhujan, tdsValue, pHair, tanggal_waktu, jumlahhama, temperatureC) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW(), %s, %s)"
+                )
+                data_values = (suhu, kelembaban, distancePercentage, serialonoff, 0, sensorhujan, tdsValue, pHair, 0, temperatureC)
+
+                cursor.execute(insert_query, data_values)
+                conn.commit()
+                # Tambahkan perintah SQL untuk mengambil data rata-rata dari tabel rata_rata
+                select_query_rata_rata = "SELECT `id`, `tanggal`, `rata_rata` FROM `tabel_rata_rata` WHERE 1"
+                cursor.execute(select_query_rata_rata)
+                rata_rata_rows = cursor.fetchall()
+
+                # Tampilkan nilai rata-rata saja
+                for rata_rata_row in rata_rata_rows:
+                    tanggal_rata_rata = rata_rata_row[1]
+                    rata_rata_value = rata_rata_row[2]
+                    print(f"Rata-rata       : {rata_rata_value}")
+                    if 0 <= rata_rata_value <= 1:
+                        print("Intensitas Hama : Skala 1 (Sehat)")
+                        lcdDisplay.set(f' Skala 1 {rata_rata_value}%', 1)  # Baris 1
+                    elif 1 <= rata_rata_value <= 25:
+                        print("Intensitas Hama : Skala 2 (Sangat Ringan)")
+                        lcdDisplay.set(f' Skala 2 {rata_rata_value}%', 1)  # Baris 1
+                    elif 25 < rata_rata_value <= 50:
+                        print("Intensitas Hama : Skala 3 (Sedang)")
+                        lcdDisplay.set(f' Skala 3 {rata_rata_value}%', 1)  # Baris 1
+                    elif 50 < rata_rata_value <= 75:
+                        print("Intensitas Hama : Skala 4 (Berat )")
+                        lcdDisplay.set(f' Skala 4 {rata_rata_value}%', 1)  # Baris 1
+                    elif 75 < rata_rata_value <= 100:
+                        print("Intensitas Hama : Skala 5 (Sangat Berat)")
+                        lcdDisplay.set(f' Skala 5 {rata_rata_value}%', 1)  # Baris 1
+                    else:
+                        print("Intensitas Hama : 2x Lipat (Lakukan Pengecekan)")
+                        lcdDisplay.set(f'2X Lipat {rata_rata_value}%', 1)  # Baris 1
+                        
+                print("-------------------------------")
+                
+                #lcdDisplay.set(f'Intens: {rata_rata_value}%', 1)  # Baris 1
+                lcdDisplay.set(f'   {tanggal_rata_rata}', 2)  # Baris 2
+                
+except KeyboardInterrupt:
+    # Tutup koneksi serial dan database saat program dihentikan
+    ser.close()
+    cursor.close()
+    conn.close()
+    GPIO.cleanup()
