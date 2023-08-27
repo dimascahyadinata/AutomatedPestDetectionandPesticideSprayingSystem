@@ -1,0 +1,255 @@
+#include "DHT.h"
+#include <WiFi.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
+#include <UrlEncode.h>
+
+#define TdsSensorPin 34
+#define VREF 3.3
+#define SCOUNT  30
+
+int analogBuffer[SCOUNT];
+int analogBufferTemp[SCOUNT];
+unsigned long printTimepoint = 0;
+static unsigned long analogSampleTimepoint = millis();
+
+ 
+int analogBufferIndex = 0, copyIndex = 0;
+float averageVoltage = 0, temperature = 25;
+int tdsValue = 0;
+float pHair = 0;
+float PH_step;
+int nilai_analog_PH;
+double TeganganPh;
+//bagian kalibrasi pH
+float PH4 = 12.50; //Kalo kalibrasi cek dulu bosku tegangan phnya
+float PH7 = 10.41;
+
+#define DHTPIN 25
+#define DHTTYPE DHT11
+
+DHT dht(DHTPIN, DHTTYPE);
+
+const int trigPin = 14;
+const int echoPin = 27;
+const int relayPin = 13;
+const int relayair = 23;
+const int relaysemprot = 19;
+const int pinData = 12;
+const int ph_Pin = 35;
+
+OneWire oneWire(pinData);
+DallasTemperature sensors(&oneWire);
+
+// Define variables
+long duration;
+int distance;
+int distancePercentage;
+int kapasitas = 0;
+int serialonoff = 0;
+int relaynilai = 0;
+int serialwemos = 0;
+int getMedianNum(int bArray[], int iFilterLen)
+{
+  int bTab[iFilterLen];
+  for (byte i = 0; i < iFilterLen; i++)
+    bTab[i] = bArray[i];
+  int i, j, bTemp;
+  for (j = 0; j < iFilterLen - 1; j++)
+  {
+    for (i = 0; i < iFilterLen - j - 1; i++)
+    {
+      if (bTab[i] > bTab[i + 1])
+      {
+        bTemp = bTab[i];
+        bTab[i] = bTab[i + 1];
+        bTab[i + 1] = bTemp;
+      }
+    }
+  }
+  if ((iFilterLen & 1) > 0)
+    bTemp = bTab[(iFilterLen - 1) / 2];
+  else
+    bTemp = (bTab[iFilterLen / 2] + bTab[iFilterLen / 2 - 1]) / 2;
+  return bTemp;
+}
+void setup()
+{
+  Serial.begin(115200);
+  pinMode(TdsSensorPin, INPUT);
+  pinMode(trigPin, OUTPUT);
+  pinMode(echoPin, INPUT);
+  pinMode(relayPin, OUTPUT);
+  pinMode(relayair, OUTPUT);
+  pinMode(relaysemprot, OUTPUT);
+  pinMode(ph_Pin, INPUT);
+  dht.begin();
+  sensors.begin();
+  // Matikan relay pada awalnya
+  digitalWrite(relayair, HIGH);
+}
+
+void loop()
+{ 
+  sensors.requestTemperatures();
+  float temperatureC = sensors.getTempCByIndex(0);
+  float suhu = dht.readTemperature();
+  int kelembaban = dht.readHumidity();
+  int sensorhujan = analogRead(36);
+
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(2);
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigPin, LOW);
+
+  duration = pulseIn(echoPin, HIGH);
+  distance = duration * 0.034 / 2;
+
+  //25 diambil dari ukuran tinggi tangki
+  distancePercentage = map(distance, 0, 25, 100, 0);
+  distancePercentage = constrain(distancePercentage, 0, 100);
+
+  if (millis() - analogSampleTimepoint > 40U)
+  {
+    analogSampleTimepoint = millis();
+    analogBuffer[analogBufferIndex] = analogRead(TdsSensorPin);
+    analogBufferIndex++;
+    if (analogBufferIndex == SCOUNT)
+      analogBufferIndex = 0;
+  }
+
+  if (millis() - printTimepoint > 800U)
+  {
+    printTimepoint = millis();
+    for (copyIndex = 0; copyIndex < SCOUNT; copyIndex++)
+    analogBufferTemp[copyIndex] = analogBuffer[copyIndex];
+    averageVoltage = getMedianNum(analogBufferTemp, SCOUNT) * (float)VREF / 1024.0;
+    //Bagian kalibrasi TDS
+    float compensationCoefficient = 1.6 + 0.02 * (temperature - 25.0);
+    float compensationVoltage = averageVoltage / compensationCoefficient;
+    tdsValue = int((133.42 * compensationVoltage * compensationVoltage * compensationVoltage - 255.86 * compensationVoltage * compensationVoltage + 857.39 * compensationVoltage) * 0.5);
+    Serial.println("-------------------------------");
+    if (tdsValue < 560) {
+      Serial.print("TDS Value Rendah: ");
+      Serial.print(tdsValue, 0);
+      Serial.println("PPM");
+    } else if (tdsValue >= 560 && tdsValue <= 840) {
+      Serial.print("TDS Value       : ");
+      Serial.print(tdsValue, 0);
+      Serial.println("PPM");
+    } else {
+      Serial.print("TDS Value Tinggi: ");
+      Serial.print(tdsValue, 0);
+      Serial.println("PPM");
+    }
+  }
+
+  Serial.print("Kapasitas Tank  : ");
+  Serial.print(distancePercentage);
+  Serial.println("%");
+
+  Serial.print("Suhu Air        : ");
+  Serial.print(temperatureC);
+  Serial.println("°C");
+
+  nilai_analog_PH = analogRead(ph_Pin);
+  Serial.print("Nilai ADC       : ");
+  Serial.println(nilai_analog_PH);
+  TeganganPh = 3.3 / 1024.0 * nilai_analog_PH;
+  Serial.print("TeganganPh      : ");
+  Serial.println(TeganganPh, 3);
+
+  PH_step = (PH4 - PH7) / 3;
+  pHair = 7.00 + ((PH7 - TeganganPh) / PH_step);
+  Serial.print("Nilai pH Cairan : ");
+  Serial.println(pHair, 2);
+
+  if (sensorhujan < 4000) {
+    Serial.println("Sensor Hujan    : Aktif: " + String(sensorhujan));
+    sensorhujan = 1;
+  } else {
+    Serial.println("Sensor Hujan    : Tidak Aktif: " + String(sensorhujan));
+    sensorhujan = 0;
+  }
+
+  Serial.println("Suhu DHT11      : " + String(suhu) + "°C");
+  Serial.println("Kelembaban      : " + String(kelembaban));
+
+  if (distancePercentage < 10) {
+    kapasitas = 1;
+    Serial.println("Pestisida Habis");
+  } else if (distancePercentage > 10) {
+    kapasitas = 0;
+  }
+  
+  // Periksa apakah ada data yang tersedia untuk dibaca dari port Serial
+if (Serial.available() > 0) {
+  // Baca pesan yang masuk dan konversi ke float (angka desimal)
+  float rata_rata_value = Serial.parseFloat();
+
+  // Periksa apakah nilai rata_rata_value valid
+  // Misalnya, jika nilai rata_rata_value berada dalam rentang 0-100, maka nilai valid
+  if (rata_rata_value >= 0 && rata_rata_value <= 100) {
+    // Lakukan sesuatu dengan nilai rata_rata_value
+    // Contoh: Tampilkan nilai rata-rata di layar LCD atau lakukan tindakan lainnya sesuai dengan nilai rata-rata
+
+    // Contoh, tampilkan nilai rata-rata di Serial Monitor
+    Serial.print("Nilai rata-rata: ");
+    Serial.println(rata_rata_value);
+
+    // Hidupkan relay berdasarkan nilai rata_rata_value
+    if (rata_rata_value >= 1 && rata_rata_value <= 25) {
+      // Hidupkan relay dan atur durasi menjadi 7 detik
+      digitalWrite(relayair, LOW);
+      serialonoff = 1;
+    } else if (rata_rata_value > 25 && rata_rata_value <= 50) {
+      // Hidupkan relay dan atur durasi menjadi 15 detik
+      digitalWrite(relayair, LOW);
+      serialonoff = 1;
+      delay(3200);
+    } else if (rata_rata_value > 50 && rata_rata_value <= 75) {
+      // Hidupkan relay dan atur durasi menjadi 22 detik
+      digitalWrite(relayair, LOW);
+      serialonoff = 1;
+      delay(8500);
+    } else if (rata_rata_value > 75) {
+      // Hidupkan relay dan atur durasi menjadi 30 detik
+      digitalWrite(relayair, LOW);
+      serialonoff = 1;
+      delay(13800);
+    } else {
+      // Matikan relay jika nilai rata_rata_value tidak lebih besar dari 1
+      serialonoff = 0;
+      digitalWrite(relayair, HIGH);
+    }
+
+  }
+}
+
+  Serial.println("-------------------------------");
+
+  // Send the data via Serial
+  Serial.print("distancePercentage:");
+  Serial.print(distancePercentage);
+  Serial.print(",temperatureC:");
+  Serial.print(temperatureC);
+  Serial.print(",suhu:");
+  Serial.print(suhu);
+  Serial.print(",kelembaban:");
+  Serial.print(kelembaban);
+  Serial.print(",sensorhujan:");
+  Serial.print(sensorhujan);
+  Serial.print(",tdsValue:");
+  Serial.print(tdsValue);
+  Serial.print(",pHair:");
+  Serial.print(pHair);
+  Serial.print(",kapasitas:");
+  Serial.print(kapasitas);
+  Serial.print(",serialonoff:");
+  Serial.print(serialonoff);
+
+  // Send a newline character to indicate the end of data
+  Serial.println();
+  delay(1000);
+}
